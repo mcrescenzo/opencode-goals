@@ -1,0 +1,48 @@
+{
+  "name": "@mcrescenzo/opencode-goals",
+  "version": "0.1.0",
+  "description": "opencode plugin for defining, tracking, and evaluating session goals via a /goal command and hidden evaluator agents.",
+  "type": "module",
+  "main": "./goals.js",
+  "exports": {
+    ".": "./goals.js"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.17.7"
+  },
+  "files": [
+    "goals.js",
+    "goals-core.js",
+    "goal-state.js",
+    "diagnostics.js",
+    "secret-redaction.js",
+    "unicode-text.js",
+    "commands",
+    "SECURITY.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md",
+    "README.md"
+  ],
+  "license": "MIT",
+  "author": "Michael Crescenzo",
+  "publishConfig": { "access": "public" },
+  "engines": { "node": ">=20.11.0" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mcrescenzo/opencode-goals"
+  },
+  "bugs": {
+    "url": "https://github.com/mcrescenzo/opencode-goals/issues"
+  },
+  "homepage": "https://github.com/mcrescenzo/opencode-goals#readme",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "goals",
+    "goal-tracking"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  }
+}

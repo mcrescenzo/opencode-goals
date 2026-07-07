@@ -1,0 +1,19 @@
+
+# Local issue-tracker / version-control tooling state
+.beads/
+.dolt/
+*.db
+.beads-credential-key
+
+# Local runtime / agent-tooling state (not part of the plugin)
+.remember/
+.hermes-bughunt/
+node_modules/
+*.log
+.probe-events.log
+.opencode/
+.repo-review/
+REVIEW-FINDINGS.md
+REVIEW-BACKLOG-CROSSWALK.md
+HARDEN-BACKLOG-CROSSWALK.md
+*.tgz
