@@ -1,6 +1,6 @@
 {
   "name": "@mcrescenzo/opencode-goals",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "opencode plugin for defining, tracking, and evaluating session goals via a /goal command and hidden evaluator agents.",
   "type": "module",
   "main": "./goals.js",
@@ -26,8 +26,12 @@
   ],
   "license": "MIT",
   "author": "Michael Crescenzo",
-  "publishConfig": { "access": "public" },
-  "engines": { "node": ">=20.11.0" },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20.11.0"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/mcrescenzo/opencode-goals"

@@ -1,80 +1,77 @@
 # goals — the `/goal` plugin for opencode
 
-An opencode plugin that adds a single, persistent **`/goal`** for a session and
-keeps the assistant auto-continuing until a hidden evaluator agent decides the
-goal is actually achieved — not merely until the assistant claims it is.
+Long agentic sessions drift: the assistant wanders off the original ask, loses
+the thread after a few tool calls, or declares victory ("Done! ✅") on work
+that doesn't actually satisfy what you asked for. `/goal` fixes that by
+keeping a single, persistent objective for the session and refusing to accept
+"I'm done" at face value.
 
-## What it does
+Under the hood, after each assistant turn the plugin relays bounded, sanitized
+evidence — a recent transcript excerpt, tool call/result summaries, the
+session diff, the goal text, and any assistant-claimed evidence — to a hidden
+**`goal-evaluator`** agent, which returns the real, final verdict. For
+file/test/docs/review-oriented goals a hidden read-only **`goal-researcher`**
+agent may gather additional evidence first. Until the evaluator marks the goal
+met (or the goal is blocked, paused, or its budget is exhausted), the plugin
+sends an auto-continue prompt so work proceeds without a human re-prompting
+every turn.
 
-`/goal <objective>` sets one session goal. After each assistant turn the plugin
-relays bounded, sanitized evidence (a recent transcript excerpt, tool call/result
-summaries, the session diff, the goal text, and any assistant-claimed evidence)
-to a hidden **`goal-evaluator`** agent, which returns the final structured
-verdict. For file/test/docs/review-oriented goals a hidden read-only
-**`goal-researcher`** agent may gather additional evidence first. Until the
-evaluator marks the goal met (or the goal is blocked, paused, or its budget is
-exhausted), the plugin sends an auto-continue prompt so work proceeds without a
-human re-prompting each turn.
+## Example
 
-Key behaviors:
+```
+/goal Get all tests in src/api passing and update the CHANGELOG
+```
 
-- **Evaluator has final say.** Assistant markers are signals, not authority. The
-  assistant may emit `[goal:evidence] ...` immediately before a terminal
-  `[goal:complete]`, and `[goal:blocked]` (preceded by a concrete blocker) to
-  pause — but only the hidden evaluator marks a goal achieved.
-- **Two hidden agents, locked down.** `goal-evaluator` runs with all tools
-  denied; `goal-researcher` is deny-by-default with only targeted `read` and
-  `grep` allowed under secret-path deny rules (`.env`, `*.pem`, `*.key`,
-  credentials, secrets, tokens). Broad `glob`, `list`, and `lsp` enumeration is
-  denied. Both inherit the session's configured model.
-- **Human-first pausing.** A real user message after the last auto-continuation
-  pauses before any hidden agent or further continuation, so the latest human
-  instruction wins. Permission/question prompts block automation while waiting;
-  a rejection pauses the goal.
-- **Runaway backstops.** Beyond the per-goal turn budget there are lifetime
-  ceilings (a ~3-hour wall-clock cap and a hidden-call budget) and stall
-  heuristics that pause repeated low-progress, no-tool-call, or repeated-diff
-  loops with no criteria progress. These are not reset by `/goal resume`.
-- **Verification and observe modes.** A `--verify` directive tells the build
-  agent which command to run under its normal permissions (the plugin never
-  executes it), and `--observe` lets the evaluator report not-met verdicts
-  without auto-continuing.
-- **Polite progress toasts.** The active session goal emits compact lifecycle
-  toasts plus a best-effort heartbeat while active, including the objective,
-  turn usage, latest evaluator reason, verification failure, or error summary.
-- **Persistence + recovery.** Goal state is written per workspace and active
-  goals recover as *paused* after an opencode restart (see Persistence below).
+Setting the goal fires an immediate toast and puts the session to work:
 
-The plugin self-registers the `/goal` command from its bundled `commands/goal.md`; no separate command file is required.
+```
+Goal active
+Goal: Get all tests in src/api passing and update the CHANGELOG
+Status: active · 0/100 turns · 0s
+Evaluator: waiting for first verdict.
+```
 
-> Privacy: hidden evaluator/researcher calls send transcript excerpts, bounded
-> tool summaries, diffs, goal text, and research summaries to the configured
-> model/provider. Secret-path protections redact file/diff/research content for
-> sensitive paths, and transcript text receives best-effort inline credential
-> pattern redaction before hidden-agent relay, including common key assignments,
-> provider token prefixes, bearer/basic auth, cookies, URL credentials, PEM keys,
-> AWS access keys, JWT-shaped strings, and session/csrf-style token prefixes.
-> This is not a comprehensive secrecy boundary: arbitrary opaque secrets may not
-> match these patterns, do not paste secrets into chat, and nested `.gitignore`
-> files are not a secrecy boundary for transcript evidence.
+While the assistant works, ambient status toasts reflect the evaluator's
+running verdict — for example, if it isn't convinced yet:
 
-## Commands
+```
+Goal: Get all tests in src/api passing and update the CHANGELOG
+Status: active · 3/100 turns · 1m 12s
+Evaluator: not met (medium confidence): No evidence yet that src/api tests
+pass or that CHANGELOG was updated.
+Gap: No test run output for src/api
+```
 
-- `/goal <objective>` — start or replace the session goal.
-- `/goal status` — objective, criteria, constraints, turn usage, evaluator
-  reason, evidence, blocker, and recent history.
-- `/goal help`, `/goal --help`, `/goal -h` — usage summary for the command
-  surface and completion marker.
-- `/goal history` — lifecycle events for the current session goal.
-- `/goal pause`, `/goal resume`, `/goal clear` — control automation.
-- `/goal observe`, `/goal observe on`, `/goal observe off` — toggle observe
-  mode, where hidden evaluation/research still runs but not-met verdicts pause
-  instead of auto-continuing.
-- `/goal continue` or `/goal step` — send one explicit continuation, useful
-  after an observe-mode verdict pause.
-- `/goal edit <new objective>` — revise the objective while preserving the turn
-  limit and history; omitted success, constraints, and verify flags are cleared.
-- Clear aliases: `clear`, `stop`, `off`, `reset`, `none`, `cancel`.
+Under the hood, the evaluator's real verdicts are structured JSON matching the
+schema in `goals-core.js` (illustrative values):
+
+```json
+{
+  "met": false,
+  "confidence": "medium",
+  "evidence_gaps": ["No test run output for src/api"],
+  "criteria": [
+    { "description": "All tests in src/api pass", "status": "unverified", "evidence_ref": "" }
+  ],
+  "next_steps": ["Run the test suite for src/api"],
+  "reason": "No evidence yet that src/api tests pass or that CHANGELOG was updated.",
+  "next": "continue"
+}
+```
+
+Once the evaluator sees real evidence in the transcript (a passing test run,
+an updated `CHANGELOG.md`), it flips `met` to `true` and the goal toast changes
+accordingly:
+
+```
+Goal achieved
+Goal: Get all tests in src/api passing and update the CHANGELOG
+Status: achieved · 7/100 turns · 3m 41s
+Evidence: All tests in src/api pass and CHANGELOG.md has a new entry.
+```
+
+Only the hidden evaluator can produce that final "achieved" state — the build
+assistant claiming completion in its own reply is never enough on its own.
 
 ## Install and registration
 
@@ -128,143 +125,77 @@ loaded at startup.
 contains either the package name (`@mcrescenzo/opencode-goals`) or a valid,
 readable path to `goals.js`, and that opencode was restarted after the edit.
 
-## Hooks
+## What it does
 
-`goals.js` wires exactly five hooks on the plugin factory it exports
-(`GoalPlugin`):
+`/goal <objective>` sets one session goal. Key behaviors:
 
-| Hook | What it does here |
-|---|---|
-| `config` | Self-registers the `/goal` command from the bundled `commands/goal.md` and defines the two hidden agents, `goal-evaluator` (all tools denied) and `goal-researcher` (read-only, secret-path denies). |
-| `"chat.message"` | Tracks the human-authored build turn's agent/model and, on a genuine human message during an active goal, marks the goal human-interrupted so auto-continuation yields to the user. |
-| `"command.execute.before"` | Intercepts the `/goal` command (set, status, pause, resume, clear, etc.) before it reaches the model and replaces the turn's parts with the plugin's own output. |
-| `event` | Fire-and-forget session-event listener: tracks permission/question ask-and-reply to block/unblock automation, pauses on rejections and session errors, and triggers hidden evaluation on session idle. |
-| `"experimental.session.compacting"` | Injects a deduplicated goal-state context block into the compaction prompt so an active goal survives context compaction. |
+- **Evaluator has final say.** Assistant-authored completion markers are
+  signals, not authority — see "For AI agents" below for the exact marker
+  contract. Only the hidden evaluator marks a goal achieved.
+- **Two hidden agents, locked down.** `goal-evaluator` runs with all tools
+  denied; `goal-researcher` is deny-by-default with only targeted `read` and
+  `grep` allowed under secret-path deny rules (`.env`, `*.pem`, `*.key`,
+  credentials, secrets, tokens). Broad `glob`, `list`, and `lsp` enumeration is
+  denied. Both inherit the session's configured model.
+- **Human-first pausing.** A real user message after the last auto-continuation
+  pauses before any hidden agent or further continuation, so the latest human
+  instruction wins. Permission/question prompts block automation while waiting;
+  a rejection pauses the goal.
+- **Runaway backstops.** Beyond the per-goal turn budget there are lifetime
+  ceilings (a ~3-hour wall-clock cap and a hidden-call budget) and stall
+  heuristics that pause repeated low-progress, no-tool-call, or repeated-diff
+  loops with no criteria progress. These are not reset by `/goal resume`.
+- **Verification and observe modes.** A `--verify` directive tells the build
+  agent which command to run under its normal permissions (the plugin never
+  executes it), and `--observe` lets the evaluator report not-met verdicts
+  without auto-continuing.
+- **Polite progress toasts.** The active session goal emits compact lifecycle
+  toasts plus a best-effort heartbeat while active, including the objective,
+  turn usage, latest evaluator reason, verification failure, or error summary
+  (see the Example above).
+- **Persistence + recovery.** Goal state is written per workspace and active
+  goals recover as *paused* after an opencode restart (see Persistence below).
 
-## opencode compatibility
+The plugin self-registers the `/goal` command from its bundled `commands/goal.md`; no separate command file is required.
 
-The plugin targets Node.js **`>=20.11.0`** and the current/latest opencode
-session-client contract checked during release preparation (`opencode --version`
-observed as `1.17.13`). Its source imports no `@opencode-ai/*` module directly;
-`@opencode-ai/plugin` is declared only to pin the host contract version.
+> Privacy: hidden evaluator/researcher calls send transcript excerpts, bounded
+> tool summaries, diffs, goal text, and research summaries to the configured
+> model/provider. Secret-path protections redact file/diff/research content for
+> sensitive paths, and transcript text receives best-effort inline credential
+> pattern redaction before hidden-agent relay, including common key assignments,
+> provider token prefixes, bearer/basic auth, cookies, URL credentials, PEM keys,
+> AWS access keys, JWT-shaped strings, and session/csrf-style token prefixes.
+> This is not a comprehensive secrecy boundary: arbitrary opaque secrets may not
+> match these patterns, do not paste secrets into chat, and nested `.gitignore`
+> files are not a secrecy boundary for transcript evidence.
 
-Session client calls prefer the v2 option-object shape `path: { sessionID }`.
-Because local `@opencode-ai/sdk`/`@opencode-ai/plugin` `1.17.7` installs still
-show an injected v1-style plugin client requiring `path: { id }`, the adapter
-falls back to that observed v1 path shape only for request-shape incompatibility
-errors. Message, tool-result, and diff parsing also retains compatibility with
-observed v1 payloads such as assistant agent identity in `info.mode`, tool
-input/output under `state`, and `FileDiff` records with `before`/`after`.
+## For AI agents
 
-## Support and security
+If you're the build assistant working under an active `/goal`, signal
+progress with markers the hidden evaluator treats as claims, not proof: put
+`[goal:evidence] <proof>` immediately before a terminal `[goal:complete]`, and
+state the concrete blocker on the line immediately before `[goal:blocked]`
+when you genuinely need human input. The evaluator — not these markers —
+decides whether the goal is actually met, so `[goal:complete]` without a
+preceding `[goal:evidence]` line is rejected.
 
-Use GitHub Issues for public bugs, support requests, and feature proposals:
+## Commands
 
-<https://github.com/mcrescenzo/opencode-goals/issues>
-
-Do **not** post secrets, credentials, private logs, exploit details, sensitive
-vulnerability details, or private workspace data in public issues. See
-`SECURITY.md` for the current reporting policy, `CONTRIBUTING.md` for pull
-request expectations, and `CHANGELOG.md` for release notes.
-
-## Running the tests
-
-The suite uses Node's built-in `node:test` runner — no external test framework.
-Run it from the plugin root:
-
-```bash
-node --test tests/*.test.mjs
-```
-
-This is also wired as the package's `test` script, so `bun run test` (or
-`npm test`) runs the same command.
-
-`tests/goals-plugin.test.mjs` is the helper-heavy regression file: it imports
-the pure helpers directly from `goals-core.js` by name, so export an internal
-helper from there when adding focused regression coverage.
-`tests/command-registration.test.mjs` covers command registration and
-package-metadata assertions; see the subsections below for the `pack-smoke`
-and `runtime-smoke` gates.
-
-### Packed-tarball release smoke
-
-`tests/pack-smoke.test.mjs` is a no-token gate that proves the **published
-artifact** is self-contained. It runs `npm pack` into a temp dir outside the
-repo, extracts the tarball, dynamically imports the extracted entry, and asserts
-that the `/goal` command and both hidden agents still register from the packed
-tree — catching a `files` whitelist gap, a broken export, or a parent-config
-assumption before release. It runs automatically as part of `npm test` (no
-network, no model calls, no credentials).
-
-The exact local command is:
-
-```bash
-node --test tests/pack-smoke.test.mjs   # or: npm test
-```
-
-### Zero-token runtime registration smoke
-
-`tests/runtime-smoke.test.mjs` is a deterministic plugin-runtime harness for
-startup registration. It constructs the real `GoalPlugin` in a temp workspace,
-runs the `config` hook without relying on global model/provider configuration,
-and asserts that:
-
-- bundled `/goal` command registration succeeds;
-- the hidden `goal-evaluator` denies all tools;
-- the hidden `goal-researcher` is read-only with secret-path denies; and
-- `/goal status` and `/goal help` command hooks return non-generating output
-  without calling any client session/model prompt APIs.
-
-Because the fake client throws on `session.prompt`, `session.promptAsync`,
-`session.create`, `session.messages`, and `session.diff`, a passing run is
-observable evidence that this smoke used zero model calls/tokens and cleaned up
-its temp runtime state.
-
-Run it directly with:
-
-```bash
-node --test tests/runtime-smoke.test.mjs   # or: npm test
-```
-
-### Opt-in host-contract smoke
-
-`tests/host-contract-smoke.test.mjs` is skipped by default. When explicitly
-enabled, it starts `opencode serve --pure` in a temp workspace using the normal
-local opencode config, creates a real opencode session client with the local
-SDK, and drives the hidden-session lifecycle through this package's session
-helpers: parent create, hidden child create, child prompt, child abort, child
-delete, and `hiddenSessionPrompt` cleanup. The prompt uses `noReply: true`, so
-it is intended to exercise host request handling without model generation; if a
-host still returns a provider/model runtime error for the prompt, the smoke keeps
-checking request routing and cleanup rather than treating that as a path-shape
-failure.
-
-Run it only as a manual host-contract check:
-
-```bash
-OPENCODE_GOALS_HOST_SMOKE=1 node --test tests/host-contract-smoke.test.mjs
-```
-
-Optional knobs:
-
-```bash
-OPENCODE_GOALS_HOST_SMOKE_CLI=/path/to/opencode
-OPENCODE_GOALS_HOST_SMOKE_TIMEOUT_MS=15000
-OPENCODE_GOALS_HOST_SMOKE_CONFIG_CONTENT='{"model":"provider/model"}'
-```
-
-For a stronger manual release check, install the packed tarball into a throwaway
-external project and confirm it resolves by name (this follows the Bun lockfile
-install policy and does **not** publish):
-
-```bash
-npm pack --pack-destination /tmp/goals-rel
-mkdir /tmp/goals-rel/probe && cd /tmp/goals-rel/probe
-bun init -y
-bun add /tmp/goals-rel/mcrescenzo-opencode-goals-*.tgz
-node -e "import('@mcrescenzo/opencode-goals').then(m => console.log(typeof m.GoalPlugin))"
-cd - && rm -rf /tmp/goals-rel
-```
+- `/goal <objective>` — start or replace the session goal.
+- `/goal status` — objective, criteria, constraints, turn usage, evaluator
+  reason, evidence, blocker, and recent history.
+- `/goal help`, `/goal --help`, `/goal -h` — usage summary for the command
+  surface and completion marker.
+- `/goal history` — lifecycle events for the current session goal.
+- `/goal pause`, `/goal resume`, `/goal clear` — control automation.
+- `/goal observe`, `/goal observe on`, `/goal observe off` — toggle observe
+  mode, where hidden evaluation/research still runs but not-met verdicts pause
+  instead of auto-continuing.
+- `/goal continue` or `/goal step` — send one explicit continuation, useful
+  after an observe-mode verdict pause.
+- `/goal edit <new objective>` — revise the objective while preserving the turn
+  limit and history; omitted success, constraints, and verify flags are cleared.
+- Clear aliases: `clear`, `stop`, `off`, `reset`, `none`, `cancel`.
 
 ## Configuration options
 
@@ -317,7 +248,31 @@ project directory. The cycle ledger stores bounded structured evaluator records
 incremental criteria stability and stuck-loop detection. Keep `.opencode/goals/` out of git unless a project
 intentionally wants local goal history committed.
 
+## Running the tests
+
+```bash
+node --test tests/*.test.mjs
+```
+
+This is also wired as the package's `test` script, so `bun run test` (or
+`npm test`) runs the same command. See [CONTRIBUTING.md](CONTRIBUTING.md) for
+the full test suite breakdown (packed-tarball release smoke, zero-token
+runtime registration smoke, and the opt-in host-contract smoke), development
+setup, and pull request expectations.
+
+## Support and security
+
+Use GitHub Issues for public bugs, support requests, and feature proposals:
+
+<https://github.com/mcrescenzo/opencode-goals/issues>
+
+Do **not** post secrets, credentials, private logs, exploit details, sensitive
+vulnerability details, or private workspace data in public issues. See
+`SECURITY.md` for the current reporting policy, `CONTRIBUTING.md` for pull
+request expectations, and `CHANGELOG.md` for release notes.
+
 ## Development notes
 
-See `AGENTS.md` in this directory for contributor invariants (SDK contract
-direction, hidden-agent behavior, and testing expectations).
+See [AGENTS.md](AGENTS.md) in this directory for contributor invariants (SDK
+contract direction and version compatibility, the hooks the plugin wires,
+hidden-agent behavior, and testing expectations).
