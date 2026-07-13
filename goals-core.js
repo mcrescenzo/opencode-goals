@@ -5396,6 +5396,11 @@ export async function handleGoalCommand(ctx, persistence, input, output, configu
     current.deadlineAt = now() + (Number.isFinite(current.maxGoalDurationMs) ? current.maxGoalDurationMs : DEFAULT_MAX_GOAL_DURATION_MS);
     current.goalInstanceID = newGoalInstanceID(sessionID, now());
     current.pausedAt = 0; // fresh active clock for the new objective
+    // toast-2: reset startedAt and accumulatedPausedMs so the toast's active-elapsed display
+    // restarts from zero, consistent with the fresh deadlineAt and goalInstanceID above.
+    // Without this, editing a 1-hour-old goal would show "1h 0m" elapsed despite the fresh lifetime.
+    current.startedAt = now();
+    current.accumulatedPausedMs = 0;
     // new-6: clear in-flight reentrancy flags (a stale eval fails its generation guard and cannot double-act).
     reactivateGoal(current);
     current.lastEvidence = "";

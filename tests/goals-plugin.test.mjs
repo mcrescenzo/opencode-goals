@@ -1467,6 +1467,8 @@ test("goals-74o: /goal edit resets the turn budget so a turn-exhausted goal cont
   state.status = "paused";
   state.stopReason = "Reached the 2-turn /goal budget.";
   assert.equal(stopReason(state), "Reached the 2-turn /goal budget.", "precondition: the goal is at its budget");
+  const originalStartedAt = state.startedAt;
+  const originalGoalInstanceID = state.goalInstanceID;
 
   // Edit the goal to a new objective. This reactivates it; the fix must also reset the turn budget.
   const editOutput = {};
@@ -1477,6 +1479,11 @@ test("goals-74o: /goal edit resets the turn budget so a turn-exhausted goal cont
   assert.equal(state.turns, 0, "edit must reset the turn budget (resetGoalBudget) on reactivation");
   assert.equal(state.stopReason, "", "edit must clear the prior budget stop reason");
   assert.equal(stopReason(state), "", "the budget gate must no longer trip immediately after the edit");
+  // toast-2: edit must reset startedAt and accumulatedPausedMs for a fresh active-elapsed clock.
+  assert.ok(state.startedAt > originalStartedAt, "edit must reset startedAt to now() for the new objective");
+  assert.ok(Date.now() - state.startedAt < 5000, "reset startedAt must be ~now()");
+  assert.equal(state.accumulatedPausedMs, 0, "edit must reset accumulatedPausedMs for the fresh active clock");
+  assert.notEqual(state.goalInstanceID, originalGoalInstanceID, "edit must mint a fresh goalInstanceID");
 
   // The next idle must NOT re-pause at the budget gate; it must run the evaluator and continue.
   await plugin.event({ event: { type: "session.idle", properties: { sessionID: "s" } } });
@@ -1485,6 +1492,32 @@ test("goals-74o: /goal edit resets the turn budget so a turn-exhausted goal cont
   assert.equal(continuations, 1, "the post-edit idle must send a continuation, not pause at the budget");
   assert.equal(state.turns, 1, "the reset budget must advance from 0, proving it was reset by the edit");
   assert.doesNotMatch(state.stopReason, /goal budget/, "the edited goal must not re-pause citing the budget");
+});
+
+test("toast-2: /goal edit resets startedAt so activeElapsed is near zero for the new objective", async () => {
+  clearRuntimeState();
+  const root = await tempRoot();
+  const plugin = await pluginFor(root);
+
+  await plugin["command.execute.before"](commandInput("s", "ship original"), {});
+  const state = states.get("s");
+  // Simulate a goal that has been running for 1 hour with some paused time.
+  state.startedAt = Date.now() - 60 * 60 * 1000;
+  state.accumulatedPausedMs = 10 * 60 * 1000; // 10 min of past pauses
+  state.deadlineAt = state.startedAt + 3 * 60 * 60 * 1000;
+  const staleElapsed = activeElapsedMs(state);
+  assert.ok(staleElapsed >= 50 * 60 * 1000, "precondition: stale activeElapsed is ~50m before edit");
+
+  await plugin["command.execute.before"](commandInput("s", "edit ship revised objective"), {});
+
+  assert.equal(state.startedAt, state.startedAt, "startedAt is a finite number");
+  const freshElapsed = activeElapsedMs(state);
+  assert.ok(freshElapsed < 5000, `activeElapsed must be ~0 after edit, got ${freshElapsed}ms`);
+  assert.equal(state.accumulatedPausedMs, 0, "accumulatedPausedMs reset to 0 by edit");
+  // The toast's status line should show ~0s, not ~50m.
+  const msg = goalToastMessage(state);
+  const statusLine = msg.split("\n").find((l) => l.startsWith("Status:"));
+  assert.match(statusLine, /\b\d+s\b/, "status line shows seconds (near-zero), not minutes/hours");
 });
 
 test("/goal edit parses --verify and --observe as directives instead of objective text", async () => {
