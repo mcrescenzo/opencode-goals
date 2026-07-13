@@ -2219,6 +2219,10 @@ function goalToastStatusLine(state) {
   if (Number.isFinite(state?.turns) && Number.isFinite(state?.maxTurns)) {
     bits.push(`${state.turns}/${state.maxTurns} continues`);
   }
+  // toast-4: show evaluation count when at least one verdict has run.
+  if (Number.isFinite(state?.evaluationCount) && state.evaluationCount > 0) {
+    bits.push(`${state.evaluationCount} eval${state.evaluationCount === 1 ? "" : "s"}`);
+  }
   if (Number.isFinite(state?.startedAt)) bits.push(activeElapsed(state));
   const remaining = remainingLifetimeMs(state);
   if (remaining !== null && remaining > 0) bits.push(`${formatDuration(remaining)} left`);
@@ -2268,6 +2272,11 @@ function goalToastSecondaryLine(state, options = {}) {
   }
   if (Array.isArray(state?.lastNextSteps) && state.lastNextSteps.length) {
     return `Next: ${safeToastText(state.lastNextSteps[0])}`;
+  }
+  // toast-4: show last-evaluation age as a fallback secondary line so the user can spot a stalled evaluator.
+  if (Number.isFinite(state?.lastEvaluationAt) && state.lastEvaluationAt > 0) {
+    const ageMs = now() - state.lastEvaluationAt;
+    if (ageMs > 0) return `Last eval ${formatDuration(ageMs)} ago`;
   }
   return "";
 }
@@ -3255,6 +3264,10 @@ export function normalizeLoadedState(sessionID, raw) {
       typeof raw.lastResearchReport === "string" ? raw.lastResearchReport : "",
       GOAL_LOADED_FIELD_MAX_CHARS.lastResearchReport,
     ),
+    // toast-4: backward-compat defaults for old state files.
+    evaluationCount: Number.isFinite(raw.evaluationCount) ? Math.max(0, Math.floor(raw.evaluationCount)) : 0,
+    lastEvaluationAt:
+      Number.isFinite(raw.lastEvaluationAt) && raw.lastEvaluationAt <= now() ? raw.lastEvaluationAt : 0,
     initialAgent: typeof raw.initialAgent === "string" ? raw.initialAgent : undefined,
     lastAgent: typeof raw.lastAgent === "string" ? raw.lastAgent : undefined,
     initialModel: modelFromInput(raw.initialModel),
@@ -4714,6 +4727,11 @@ export async function applyEvaluatorResult(ctx, persistence, sessionID, state, r
     return { done: true };
   }
 
+  // toast-4: count successful evaluator verdicts (not parse errors) and stamp the timestamp
+  // so the toast can show evaluation activity and last-verdict age.
+  state.evaluationCount = (state.evaluationCount || 0) + 1;
+  state.lastEvaluationAt = now();
+
   await recordHistory(persistence, state, "evaluated", decision.reason);
   if (!stillCurrent()) return { done: true, stale: true };
 
@@ -5414,6 +5432,9 @@ export async function handleGoalCommand(ctx, persistence, input, output, configu
     current.lastVerifyResult = null;
     current.lastResearchAtTurn = undefined;
     current.lastResearchReport = "";
+    // toast-4: reset evaluation counters for the fresh objective.
+    current.evaluationCount = 0;
+    current.lastEvaluationAt = 0;
     current.lastAssistantText = "";
     current.lastAssistantMessageID = "";
     current.lastEvaluatedMessageID = "";

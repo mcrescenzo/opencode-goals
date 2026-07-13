@@ -1526,6 +1526,9 @@ test("goals-74o: /goal edit resets the turn budget so a turn-exhausted goal cont
   assert.equal(stopReason(state), "Reached the 2-turn /goal budget.", "precondition: the goal is at its budget");
   const originalStartedAt = state.startedAt;
   const originalGoalInstanceID = state.goalInstanceID;
+  // toast-4: set evaluation history to verify edit resets it.
+  state.evaluationCount = 5;
+  state.lastEvaluationAt = Date.now() - 30_000;
 
   // Edit the goal to a new objective. This reactivates it; the fix must also reset the turn budget.
   const editOutput = {};
@@ -1541,6 +1544,9 @@ test("goals-74o: /goal edit resets the turn budget so a turn-exhausted goal cont
   assert.ok(Date.now() - state.startedAt < 5000, "reset startedAt must be ~now()");
   assert.equal(state.accumulatedPausedMs, 0, "edit must reset accumulatedPausedMs for the fresh active clock");
   assert.notEqual(state.goalInstanceID, originalGoalInstanceID, "edit must mint a fresh goalInstanceID");
+  // toast-4: edit must reset evaluation counters for the fresh objective.
+  assert.equal(state.evaluationCount, 0, "edit must reset evaluationCount");
+  assert.equal(state.lastEvaluationAt, 0, "edit must reset lastEvaluationAt");
 
   // The next idle must NOT re-pause at the budget gate; it must run the evaluator and continue.
   await plugin.event({ event: { type: "session.idle", properties: { sessionID: "s" } } });
@@ -5407,6 +5413,151 @@ test("goals-94k: applyEvaluatorResult's signature matches its real call sites (n
   assert.equal(parseError.done, true, "a parse-error verdict must be terminal");
   assert.equal(malformed.status, "paused", "a parse-error verdict fails closed");
   assert.equal(malformed.lastReason, "Could not parse evaluator JSON.", "the parse-error reason is preserved");
+
+  // toast-4: verify evaluation count and timestamp are tracked correctly.
+  assert.equal(state.evaluationCount, 1, "not-met verdict increments evaluationCount");
+  assert.ok(state.lastEvaluationAt > 0, "lastEvaluationAt stamped on not-met verdict");
+  assert.equal(won.evaluationCount, 1, "met verdict increments evaluationCount");
+  assert.ok(won.lastEvaluationAt > 0, "lastEvaluationAt stamped on met verdict");
+  assert.equal(malformed.evaluationCount, 0, "parse-error verdict does NOT increment evaluationCount");
+});
+
+// ---------------------------------------------------------------------------
+// toast-4: evaluation count + last-evaluation age display and persistence
+// ---------------------------------------------------------------------------
+
+test("toast-4: evaluationCount increments once per successful verdict across multiple evaluations", async () => {
+  clearRuntimeState();
+  const root = await tempRoot();
+  const ctx = { directory: root, client: fakeClient() };
+  const persistence = persistencePaths(ctx);
+  persistence.stateWritesEnabled = false;
+
+  const state = buildGoalState("s", parseGoalArguments("ship the feature"));
+  state.persistenceRoot = root;
+  state.generation = 1;
+  states.set("s", state);
+
+  for (let i = 0; i < 3; i++) {
+    await applyEvaluatorResult(
+      ctx,
+      persistence,
+      "s",
+      state,
+      { type: "decision", decision: { met: false, reason: `not yet (turn ${i})`, parseError: false, next: "continue" } },
+      1,
+    );
+  }
+
+  assert.equal(state.evaluationCount, 3, "evaluationCount reaches 3 after three not-met verdicts");
+  assert.ok(state.lastEvaluationAt > 0, "lastEvaluationAt is stamped");
+});
+
+test("toast-4: normalizeLoadedState defaults evaluationCount and lastEvaluationAt for old state files", () => {
+  clearRuntimeState();
+  const raw = {
+    condition: "old goal without evaluation fields",
+    startedAt: Date.now() - 60_000,
+    status: "active",
+    turns: 1,
+    maxTurns: 10,
+    deadlineAt: Date.now() + 3 * 60 * 60 * 1000,
+  };
+  const loaded = normalizeLoadedState("old-session", raw);
+  assert.ok(loaded, "load succeeds for old state file");
+  assert.equal(loaded.evaluationCount, 0, "missing evaluationCount defaults to 0");
+  assert.equal(loaded.lastEvaluationAt, 0, "missing lastEvaluationAt defaults to 0");
+});
+
+test("toast-4: normalizeLoadedState loads evaluationCount and lastEvaluationAt when present", () => {
+  clearRuntimeState();
+  const raw = {
+    condition: "goal with evaluation history",
+    startedAt: Date.now() - 60_000,
+    status: "active",
+    turns: 1,
+    maxTurns: 10,
+    deadlineAt: Date.now() + 3 * 60 * 60 * 1000,
+    evaluationCount: 5,
+    lastEvaluationAt: Date.now() - 30_000,
+  };
+  const loaded = normalizeLoadedState("sess", raw);
+  assert.equal(loaded.evaluationCount, 5, "evaluationCount loaded from state file");
+  assert.ok(loaded.lastEvaluationAt > 0, "lastEvaluationAt loaded from state file");
+});
+
+test("toast-4: goalToastStatusLine shows evaluation count when > 0", () => {
+  clearRuntimeState();
+  const state = buildGoalState("s", parseGoalArguments("ship the feature"));
+  state.startedAt = Date.now() - 60_000;
+  state.turns = 2;
+  state.maxTurns = 10;
+  state.evaluationCount = 3;
+
+  const message = goalToastMessage(state);
+  const statusLine = message.split("\n").find((l) => l.startsWith("Status:"));
+  assert.match(statusLine, /3 evals/, `status line shows '3 evals', got: ${statusLine}`);
+});
+
+test("toast-4: goalToastStatusLine shows singular 'eval' when count is 1", () => {
+  clearRuntimeState();
+  const state = buildGoalState("s", parseGoalArguments("ship the feature"));
+  state.startedAt = Date.now() - 60_000;
+  state.turns = 1;
+  state.maxTurns = 10;
+  state.evaluationCount = 1;
+
+  const message = goalToastMessage(state);
+  const statusLine = message.split("\n").find((l) => l.startsWith("Status:"));
+  assert.match(statusLine, /1 eval\b/, `status line shows '1 eval' (singular), got: ${statusLine}`);
+  assert.doesNotMatch(statusLine, /1 evals/, "must not show '1 evals'");
+});
+
+test("toast-4: goalToastStatusLine omits evaluation count when 0", () => {
+  clearRuntimeState();
+  const state = buildGoalState("s", parseGoalArguments("ship the feature"));
+  state.startedAt = Date.now() - 60_000;
+  state.turns = 0;
+  state.maxTurns = 10;
+  state.evaluationCount = 0;
+
+  const message = goalToastMessage(state);
+  const statusLine = message.split("\n").find((l) => l.startsWith("Status:"));
+  assert.doesNotMatch(statusLine, /eval/, `status line omits eval count when 0, got: ${statusLine}`);
+});
+
+test("toast-4: goalToastSecondaryLine shows last-eval age as fallback", () => {
+  clearRuntimeState();
+  const state = buildGoalState("s", parseGoalArguments("ship the feature"));
+  state.startedAt = Date.now() - 5 * 60 * 1000;
+  state.turns = 2;
+  state.maxTurns = 10;
+  state.evaluationCount = 2;
+  state.lastEvaluationAt = Date.now() - 45_000; // 45s ago
+  // No verify result, no evidence gaps, no next steps -> last-eval age is the fallback secondary.
+  state.lastVerifyResult = null;
+  state.lastEvidenceGaps = [];
+  state.lastNextSteps = [];
+
+  const message = goalToastMessage(state);
+  assert.match(message, /Last eval \d+s ago/, `secondary line shows last-eval age, got: ${message}`);
+});
+
+test("toast-4: goalToastSecondaryLine prefers verify result over last-eval age", () => {
+  clearRuntimeState();
+  const state = buildGoalState("s", parseGoalArguments("ship the feature"));
+  state.startedAt = Date.now() - 5 * 60 * 1000;
+  state.turns = 2;
+  state.maxTurns = 10;
+  state.evaluationCount = 2;
+  state.lastEvaluationAt = Date.now() - 45_000;
+  state.lastVerifyResult = { status: "failed", exitCode: 1 };
+  state.lastEvidenceGaps = [];
+  state.lastNextSteps = [];
+
+  const message = goalToastMessage(state);
+  assert.match(message, /Verify: failed exit 1/, "verify result takes priority over last-eval age");
+  assert.doesNotMatch(message, /Last eval/, "last-eval age is not shown when verify result is present");
 });
 
 test("runaway hidden prompt: routed to an isolated child session and ABORTED (not just abandoned) on timeout", async () => {
