@@ -720,14 +720,39 @@ export function isSecretPath(file) {
   return SECRET_PATH_RULES.some((rule) => rule.matches(base, normalized));
 }
 
-export function elapsed(startedAt) {
-  const seconds = Math.max(0, Math.floor((now() - startedAt) / 1000));
+export function formatDuration(ms) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
   if (minutes < 60) return `${minutes}m ${rest}s`;
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${minutes % 60}m`;
+}
+
+export function elapsed(startedAt) {
+  return formatDuration(now() - startedAt);
+}
+
+// toast-1: active work time excludes paused/blocked intervals, matching how resumeActiveClock
+// adjusts deadlineAt. accumulatedPausedMs tracks past (already-resumed) pause intervals;
+// pausedAt > 0 means a pause is currently ongoing and must also be subtracted.
+export function activeElapsedMs(state) {
+  if (!state || !Number.isFinite(state.startedAt)) return 0;
+  const ongoingPauseMs =
+    Number.isFinite(state.pausedAt) && state.pausedAt > 0
+      ? Math.max(0, now() - state.pausedAt)
+      : 0;
+  return Math.max(0, now() - state.startedAt - (state.accumulatedPausedMs || 0) - ongoingPauseMs);
+}
+
+export function activeElapsed(state) {
+  return formatDuration(activeElapsedMs(state));
+}
+
+export function remainingLifetimeMs(state) {
+  if (!state || !Number.isFinite(state.deadlineAt)) return null;
+  return Math.max(0, state.deadlineAt - now());
 }
 
 export function escapeGoalText(text) {
@@ -873,7 +898,7 @@ export function buildCompactionContext(state) {
     "An OpenCode /goal is active or recently tracked for this session. Preserve it across compaction.",
     buildGoalBlock(state),
     `Goal status: ${state.status}.`,
-    `Auto-continues used: ${state.turns}/${state.maxTurns}. Elapsed: ${elapsed(state.startedAt)}.`,
+    `Auto-continues used: ${state.turns}/${state.maxTurns}. Elapsed: ${activeElapsed(state)}.`,
     // goals-2n6: lastReason (evaluator output), lastEvidence ([goal:evidence] line), blockedReason,
     // and history details are model-controlled untrusted text. Neutralize structural tags so a
     // crafted reason/evidence/blocker cannot forge or close the compaction framing that survives
@@ -902,7 +927,7 @@ export function statusText(state) {
   if (state.verifyCommand) lines.push(`Verify command: ${state.verifyCommand} (build-agent directive; plugin does not execute it)`);
   if (state.observe) lines.push("Observe mode: on (not-met verdicts pause instead of auto-continuing)");
   lines.push(
-    `Elapsed: ${elapsed(state.startedAt)}`,
+    `Elapsed: ${activeElapsed(state)}`,
     `Auto-turns: ${state.turns}/${state.maxTurns}`,
   );
   if (state.stopReason) lines.push(`Stop reason: ${state.stopReason}`);
@@ -2193,7 +2218,7 @@ function goalToastStatusLine(state) {
   if (Number.isFinite(state?.turns) && Number.isFinite(state?.maxTurns)) {
     bits.push(`${state.turns}/${state.maxTurns} turns`);
   }
-  if (Number.isFinite(state?.startedAt)) bits.push(elapsed(state.startedAt));
+  if (Number.isFinite(state?.startedAt)) bits.push(activeElapsed(state));
   if (state?.observe) bits.push("observe");
   return bits.join(" · ");
 }
@@ -3236,6 +3261,8 @@ export function normalizeLoadedState(sessionID, raw) {
     // inter-continuation sleep after reload.
     lastContinueAt: Number.isFinite(raw.lastContinueAt) && raw.lastContinueAt <= now() ? raw.lastContinueAt : 0,
     pausedAt: loadedPausedAt,
+    // toast-1: backward-compat default 0 for old state files that predate accumulatedPausedMs.
+    accumulatedPausedMs: Number.isFinite(raw.accumulatedPausedMs) ? Math.max(0, raw.accumulatedPausedMs) : 0,
     noProgressTurns: Number.isFinite(raw.noProgressTurns) ? Math.max(0, raw.noProgressTurns) : 0,
     noToolCallTurns: Number.isFinite(raw.noToolCallTurns) ? Math.max(0, raw.noToolCallTurns) : 0,
     lastAssistantText: capLoadedString(
@@ -4191,7 +4218,11 @@ export function suspendActiveClock(state) {
 export function resumeActiveClock(state) {
   if (state && state.pausedAt) {
     const idleMs = now() - state.pausedAt;
-    if (idleMs > 0 && Number.isFinite(state.deadlineAt)) state.deadlineAt += idleMs;
+    if (idleMs > 0) {
+      if (Number.isFinite(state.deadlineAt)) state.deadlineAt += idleMs;
+      // toast-1: accumulate paused time so activeElapsed can subtract it, matching deadlineAt's accounting.
+      state.accumulatedPausedMs = (state.accumulatedPausedMs || 0) + idleMs;
+    }
     state.pausedAt = 0;
   }
 }

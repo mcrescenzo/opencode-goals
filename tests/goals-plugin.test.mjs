@@ -32,6 +32,10 @@ import {
   evaluatorPrompt,
   evaluatorProtocolConfusion,
   elapsed,
+  activeElapsedMs,
+  activeElapsed,
+  remainingLifetimeMs,
+  formatDuration,
   extractBlockedReason,
   extractJsonObjectText,
   extractVerifyResult,
@@ -963,6 +967,118 @@ test("goal toast formatter distinguishes pending and error active states", () =>
   failed.lastReason = "Goal evaluation failed: timeout";
   assert.match(goalToastMessage(failed), /Error: Goal evaluation failed: timeout/);
   assert.equal(goalToastVariant(failed), "error");
+});
+
+// ---------------------------------------------------------------------------
+// toast-1: activeElapsed excludes paused/blocked time; formatDuration extracted
+// ---------------------------------------------------------------------------
+
+test("formatDuration handles second/minute/hour boundaries and future timestamps", () => {
+  assert.equal(formatDuration(0), "0s");
+  assert.equal(formatDuration(59_000), "59s");
+  assert.equal(formatDuration(60_000), "1m 0s");
+  assert.equal(formatDuration(3_599_000), "59m 59s");
+  assert.equal(formatDuration(3_600_000), "1h 0m");
+  assert.equal(formatDuration(-5_000), "0s", "negative ms clamp to 0s");
+});
+
+test("activeElapsedMs excludes accumulated paused time after resume", () => {
+  clearRuntimeState();
+  const state = buildGoalState("s", parseGoalArguments("ship the feature"));
+  // Simulate: started 2h5m ago, worked 5m, paused 2h, resumed now.
+  const realNow = Date.now();
+  state.startedAt = realNow - (2 * 60 * 60 * 1000) - (5 * 60 * 1000);
+  state.pausedAt = realNow - (2 * 60 * 60 * 1000);
+  resumeActiveClock(state);
+
+  // After resume, accumulatedPausedMs should be ~2h, and activeElapsed should be ~5m.
+  assert.ok(state.accumulatedPausedMs >= 2 * 60 * 60 * 1000 - 5000, "accumulatedPausedMs captures the 2h pause");
+  assert.ok(state.accumulatedPausedMs <= 2 * 60 * 60 * 1000 + 5000, "accumulatedPausedMs is not inflated");
+  assert.equal(state.pausedAt, 0, "pausedAt cleared after resume");
+
+  const activeMs = activeElapsedMs(state);
+  assert.ok(activeMs >= 5 * 60 * 1000 - 5000, `activeElapsed ~5m, got ${activeMs}ms`);
+  assert.ok(activeMs <= 5 * 60 * 1000 + 5000, `activeElapsed ~5m, got ${activeMs}ms`);
+
+  // Wall-clock elapsed would be ~2h5m; activeElapsed must be much smaller.
+  const wallClockMs = Date.now() - state.startedAt;
+  assert.ok(activeMs < wallClockMs / 10, "activeElapsed is far less than wall-clock elapsed");
+});
+
+test("activeElapsedMs accounts for an ongoing pause (pausedAt > 0)", () => {
+  clearRuntimeState();
+  const state = buildGoalState("s", parseGoalArguments("ship the feature"));
+  const realNow = Date.now();
+  // Started 10m ago, paused 5m ago (ongoing pause).
+  state.startedAt = realNow - 10 * 60 * 1000;
+  state.pausedAt = realNow - 5 * 60 * 1000;
+  state.accumulatedPausedMs = 0;
+
+  const activeMs = activeElapsedMs(state);
+  // Active work was only the first 5 minutes (before the pause).
+  assert.ok(activeMs >= 5 * 60 * 1000 - 5000, `activeElapsed ~5m during ongoing pause, got ${activeMs}ms`);
+  assert.ok(activeMs <= 5 * 60 * 1000 + 5000, `activeElapsed ~5m during ongoing pause, got ${activeMs}ms`);
+});
+
+test("goal toast status line shows active time, not wall-clock, after pause/resume", () => {
+  clearRuntimeState();
+  const state = buildGoalState("s", parseGoalArguments("ship the feature"));
+  const realNow = Date.now();
+  state.startedAt = realNow - (2 * 60 * 60 * 1000) - (5 * 60 * 1000);
+  state.turns = 2;
+  state.maxTurns = 10;
+  state.pausedAt = realNow - (2 * 60 * 60 * 1000);
+  resumeActiveClock(state);
+
+  const message = goalToastMessage(state);
+  const statusLine = message.split("\n").find((l) => l.startsWith("Status:"));
+
+  // Must show ~5m, NOT ~2h5m.
+  assert.match(statusLine, /\b5m \d+s\b/, `status line shows active time, got: ${statusLine}`);
+  assert.doesNotMatch(statusLine, /2h/, `status line must not show wall-clock with 2h pause, got: ${statusLine}`);
+});
+
+test("normalizeLoadedState defaults accumulatedPausedMs to 0 for old state files", () => {
+  clearRuntimeState();
+  const raw = {
+    condition: "old goal without accumulatedPausedMs",
+    startedAt: Date.now() - 60_000,
+    status: "active",
+    turns: 1,
+    maxTurns: 10,
+    deadlineAt: Date.now() + 3 * 60 * 60 * 1000,
+  };
+  const loaded = normalizeLoadedState("old-session", raw);
+  assert.ok(loaded, "load succeeds for old state file");
+  assert.equal(loaded.accumulatedPausedMs, 0, "missing accumulatedPausedMs defaults to 0");
+});
+
+test("normalizeLoadedState loads accumulatedPausedMs when present", () => {
+  clearRuntimeState();
+  const raw = {
+    condition: "goal with accumulated paused time",
+    startedAt: Date.now() - 60_000,
+    status: "paused",
+    turns: 1,
+    maxTurns: 10,
+    deadlineAt: Date.now() + 3 * 60 * 60 * 1000,
+    accumulatedPausedMs: 42_000,
+  };
+  const loaded = normalizeLoadedState("sess", raw);
+  assert.equal(loaded.accumulatedPausedMs, 42_000, "accumulatedPausedMs loaded from state file");
+});
+
+test("remainingLifetimeMs returns null when deadlineAt is not finite", () => {
+  assert.equal(remainingLifetimeMs({ deadlineAt: NaN }), null);
+  assert.equal(remainingLifetimeMs({ deadlineAt: undefined }), null);
+  assert.equal(remainingLifetimeMs(null), null);
+});
+
+test("remainingLifetimeMs returns positive duration when deadline is in the future", () => {
+  const state = { deadlineAt: Date.now() + 3 * 60 * 60 * 1000 };
+  const remaining = remainingLifetimeMs(state);
+  assert.ok(remaining > 0, "remaining lifetime is positive");
+  assert.ok(remaining <= 3 * 60 * 60 * 1000, "remaining lifetime does not exceed the budget");
 });
 
 test("goal toast heartbeat is focused on one touched session and never summarizes other active goals", async () => {
