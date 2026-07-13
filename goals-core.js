@@ -3810,12 +3810,18 @@ export async function releaseStateLock(lock) {
   const token = typeof lock === "string" ? null : lock.token;
   if (token) {
     try {
-      const stats = await lstat(lockPath);
-      if (!stats.isFile() || stats.size > STATE_LOCK_TOKEN_MAX_BYTES) return;
-      const current = await readFile(lockPath, "utf8");
+      // goals-r1j9: read the ownership token through readBoundedFile (open with O_NOFOLLOW, fstat the
+      // opened handle, bound the read) instead of a separate lstat() + path-based readFile(). A peer
+      // that replaces the small regular lockfile between validation and read with a symlink or an
+      // oversized/blocking target can no longer cause a symlink-following or unbounded read. A symlink
+      // replacement fails the O_NOFOLLOW open (ELOOP), a non-regular replacement fails the isFile fstat,
+      // and an oversized replacement throws EFBIG at the size cap — each is treated as non-owned and left
+      // in place rather than deleted.
+      const current = await readBoundedFile(lockPath, STATE_LOCK_TOKEN_MAX_BYTES);
       if (current !== token) return; // someone else owns the lock now — leave it alone
     } catch {
-      return; // lock already gone (ENOENT) or unreadable — nothing to clean up
+      return; // lock already gone (ENOENT), a symlink/non-regular/oversized replacement, or unreadable —
+      // nothing we can prove we still own, so leave it in place
     }
   }
   try {

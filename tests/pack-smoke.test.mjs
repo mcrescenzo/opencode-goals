@@ -104,6 +104,17 @@ test("npm pack produces a self-contained tarball that imports and registers /goa
   }
 });
 
+// goals-nf7v: the forbidden-path matcher rejects the runtime/state directories themselves AND any
+// nested descendants (e.g. tests/fixtures/README.md), plus exact source-map files and test/spec file
+// extensions. Factored out so the boundary behavior can be regression-tested directly.
+function isForbiddenPackPath(p) {
+  return (
+    /^(?:tests|node_modules|\.opencode|\.remember|\.beads|\.repo-review)(?:\/|$)/i.test(p) ||
+    /^(?:diagnostics|goals-core)\.js\.map$/i.test(p) ||
+    /\.(test|spec)\.m?js$/i.test(p)
+  );
+}
+
 test("npm pack --dry-run advertises exactly the package runtime files (no tests, no runtime state)", () => {
   const dryRun = execFileSync(
     "npm",
@@ -114,13 +125,50 @@ test("npm pack --dry-run advertises exactly the package runtime files (no tests,
   const paths = info[0].files.map((f) => f.path).sort();
   // The package intentionally ships only its runtime surface. Local runtime/agent
   // state (.opencode, .remember, .beads, node_modules, tests) must never be packed.
-  const forbidden = paths.filter((p) =>
-    /^(tests|node_modules|\.opencode|\.remember|\.beads|\.repo-review|diagnostics\.js\.map|goals-core\.js\.map)$/i.test(p) ||
-    /\.(test|spec)\.m?js$/i.test(p),
-  );
+  const forbidden = paths.filter((p) => isForbiddenPackPath(p));
   assert.deepEqual(forbidden, [], `packed tarball leaks non-runtime files: ${forbidden.join(", ")}`);
   // Sanity: the essential runtime files are advertised.
   for (const required of ["goals.js", "goals-core.js", "goal-state.js", "diagnostics.js", "secret-redaction.js", "unicode-text.js", "commands/goal.md", "package.json", "README.md"]) {
     assert.ok(paths.includes(required), `packed tarball is missing advertised runtime file: ${required}`);
+  }
+});
+
+test("goals-nf7v: pack forbidden-path matcher rejects nested children of forbidden directories", () => {
+  // A non-test-extension child under tests/ (or any forbidden dir) must be rejected, not only the exact
+  // directory entry. This is the regression for the original boundary bug, independent of `npm pack`.
+  const rejected = [
+    "tests",
+    "tests/fixtures/README.md",
+    "tests/fixtures/sub/deep.md",
+    "node_modules",
+    "node_modules/foo/package.json",
+    "node_modules/@scope/pkg/index.js",
+    ".opencode",
+    ".opencode/goals/state.json",
+    ".remember/x.jsonl",
+    ".beads/issues.jsonl",
+    ".repo-review/runs/report.md",
+    "diagnostics.js.map",
+    "goals-core.js.map",
+    "foo.test.mjs",
+    "bar.spec.js",
+  ];
+  for (const p of rejected) {
+    assert.ok(isForbiddenPackPath(p), `expected path to be forbidden from the tarball: ${p}`);
+  }
+  const allowed = [
+    "goals.js",
+    "goals-core.js",
+    "goal-state.js",
+    "diagnostics.js",
+    "secret-redaction.js",
+    "unicode-text.js",
+    "commands/goal.md",
+    "package.json",
+    "README.md",
+    "LICENSE",
+  ];
+  for (const p of allowed) {
+    assert.ok(!isForbiddenPackPath(p), `expected runtime path to be allowed in the tarball: ${p}`);
   }
 });

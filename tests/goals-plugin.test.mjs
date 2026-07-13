@@ -1828,6 +1828,15 @@ test("sec-1: redactInlineSecrets scrubs colon/JSON/YAML, PEM, token-prefix, and 
   assert.equal(r("https://user:verysecret@host.example/path"), "https://[redacted]@host.example/path");
   assert.equal(r("Cookie: session=abc123secret; theme=dark"), "Cookie: [redacted]");
   assert.equal(r("Set-Cookie: sid=abc123secret; HttpOnly; Path=/"), "Set-Cookie: [redacted]");
+  // goals-2j0: HTTP Basic auth schemes are case-insensitive (RFC 7235). Credential bytes must be
+  // scrubbed for lowercase, uppercase, canonical, and mixed-case spellings, in both bare and realistic
+  // header form. Asserts the secret is gone (ordering-robust) and a marker is emitted.
+  for (const scheme of ["Basic", "basic", "BASIC", "BaSiC"]) {
+    const bare = r(`${scheme} dXNlcjpwYXNz`);
+    assert.doesNotMatch(bare, /dXNlcjpwYXNz/, `${scheme}: Basic credential bytes must be redacted`);
+    assert.match(bare, /\[redacted\]/, `${scheme}: a redaction marker is emitted`);
+    assert.doesNotMatch(r(`Authorization: ${scheme} dXNlcjpwYXNz`), /dXNlcjpwYXNz/, `${scheme} header: credential redacted`);
+  }
   // bare well-known token prefixes and AWS access key ids
   assert.doesNotMatch(r("see ghp_abcdefghijklmnopqrstuvwxyz0123 here"), /ghp_abcdefghij/);
   const providerTokens = [
@@ -6354,6 +6363,23 @@ test("goals-pf3.59: releaseStateLock verifies ownership before unlinking and wil
   const oursC = await acquireFileLock(targetC);
   await releaseStateLock(oursC.lockPath); // bare-string legacy form: unconditional unlink
   await assert.rejects(readFile(oursC.lockPath), "the legacy bare-string release still removes the lock");
+
+  // Case 5 (goals-r1j9): a peer replaced the lockfile with a symlink between validation and read.
+  // releaseStateLock must NOT follow the symlink (open uses O_NOFOLLOW) and must NOT delete it as if it
+  // were our own regular lock; the symlink is left in place. Previously a path-based readFile() after a
+  // separate lstat() followed the replacement and could read unbounded/targeted data.
+  const targetSym = path.join(root, "sym.jsonl");
+  const oursSym = await acquireFileLock(targetSym);
+  const bigTarget = path.join(root, "big-target");
+  await writeFile(bigTarget, "y".repeat(STATE_LOCK_TOKEN_MAX_BYTES * 4), { mode: 0o600 });
+  await rm(oursSym.lockPath);
+  await symlink(bigTarget, oursSym.lockPath);
+  await releaseStateLock(oursSym);
+  assert.equal(
+    (await readFile(oursSym.lockPath, "utf8")).length,
+    STATE_LOCK_TOKEN_MAX_BYTES * 4,
+    "a symlink-replaced lock is left in place, not followed or deleted (goals-r1j9)",
+  );
 });
 
 test("goals-gzm.31: stale-lock stealing rejects same-mtime replacement identity", () => {

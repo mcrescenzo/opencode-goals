@@ -12,7 +12,9 @@ export function redactInlineSecretText(value, options = {}) {
     `-----BEGIN PRIVATE KEY-----${marker}-----END PRIVATE KEY-----`,
   );
   out = out.replace(/\bBearer\s+[A-Za-z0-9._~+\/=-]+=*/gi, `Bearer ${marker}`);
-  out = out.replace(/\bBasic\s+[A-Za-z0-9+\/=]{8,}/g, `Basic ${marker}`);
+  // goals-2j0: HTTP auth schemes are case-insensitive (RFC 7235), so redact Basic credentials for
+  // lowercase/uppercase/mixed-case scheme spellings, consistent with the Bearer/Cookie redactors above.
+  out = out.replace(/\bBasic\s+[A-Za-z0-9+\/=]{8,}/gi, `Basic ${marker}`);
   out = out.replace(/\b(Set-Cookie|Cookie)\s*:\s*[^\r\n]+/gi, `$1: ${marker}`);
   out = out.replace(/\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]{4,}@/g, `$1${marker}@`);
   out = out.replace(/\b(sk|pk|ghp|gho|ghu|ghs|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{10,}/g, `$1_${marker}`);

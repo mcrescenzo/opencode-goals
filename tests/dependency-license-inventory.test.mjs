@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import pkg from "../package.json" with { type: "json" };
 
@@ -9,7 +10,10 @@ const ROOT = path.resolve(import.meta.dirname, "..");
 const COPYLEFT_PATTERN = /\b(?:AGPL|GPL|LGPL)(?:[- ]?\d+(?:\.\d+)?)?\b/i;
 
 function lockPackageSpecs(lockText) {
-  return [...lockText.matchAll(/^    "([^"]+)": \["([^"]+)"/gm)].map((match) => match[2]).sort();
+  // goals-6hj7: tolerate bun.lock indentation/whitespace differences (the prior exact-4-space regex
+  // could return [] for a validly-formatted lockfile, making the coverage loop pass vacuously). The
+  // non-empty sanity assertion in the calling test is the loud-failure backstop.
+  return [...lockText.matchAll(/^\s+"([^"]+)": \["([^"]+)"/gm)].map((match) => match[2]).sort();
 }
 
 function nameVersionFromSpec(spec) {
@@ -32,25 +36,53 @@ function inventoryRows(markdown) {
     });
 }
 
-async function installedPackageJsonFiles() {
-  const nodeModules = path.join(ROOT, "node_modules");
+// goals-a6c1: walk node_modules recursively so nested package-local node_modules manifests are
+// audited too (the prior shallow scan missed node_modules/<pkg>/node_modules/<dep>/package.json).
+// Skip symlinks, .bin, and hidden/admin dirs for safe, deterministic traversal. `dir` defaults to the
+// repo root but is parameterized so the boundary behavior can be regression-tested with a temp fixture.
+async function installedPackageJsonFiles(dir = ROOT) {
+  const nodeModules = path.join(dir, "node_modules");
   if (!existsSync(nodeModules)) return [];
-  const files = [];
-  for (const ent of await readdir(nodeModules, { withFileTypes: true })) {
-    if (!ent.isDirectory() || ent.name.startsWith(".")) continue;
-    const dir = path.join(nodeModules, ent.name);
-    if (ent.name.startsWith("@")) {
-      for (const scoped of await readdir(dir, { withFileTypes: true })) {
-        if (!scoped.isDirectory()) continue;
-        const file = path.join(dir, scoped.name, "package.json");
-        if (existsSync(file)) files.push(file);
-      }
-      continue;
-    }
-    const file = path.join(dir, "package.json");
-    if (existsSync(file)) files.push(file);
+  const files = new Set();
+
+  async function visitPackage(pkgDir) {
+    const file = path.join(pkgDir, "package.json");
+    if (existsSync(file)) files.add(file);
+    // nested transitive deps installed under this package's own node_modules
+    await walkNodeModules(path.join(pkgDir, "node_modules"));
   }
-  return files.sort();
+
+  async function walkNodeModules(nmDir) {
+    let entries;
+    try {
+      entries = await readdir(nmDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of entries) {
+      if (!ent.isDirectory() || ent.isSymbolicLink()) continue;
+      if (ent.name === ".bin" || ent.name.startsWith(".")) continue;
+      const child = path.join(nmDir, ent.name);
+      if (ent.name.startsWith("@")) {
+        // scoped: each child directory is a package
+        let scopedEntries;
+        try {
+          scopedEntries = await readdir(child, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const scoped of scopedEntries) {
+          if (!scoped.isDirectory() || scoped.isSymbolicLink()) continue;
+          await visitPackage(path.join(child, scoped.name));
+        }
+      } else {
+        await visitPackage(child);
+      }
+    }
+  }
+
+  await walkNodeModules(nodeModules);
+  return [...files].sort();
 }
 
 test("dependency license inventory covers every pinned bun.lock package", async () => {
@@ -64,7 +96,11 @@ test("dependency license inventory covers every pinned bun.lock package", async 
   const inventory = await readFile(path.join(ROOT, "DEPENDENCY-LICENSES.md"), "utf8");
   const rows = new Map(inventoryRows(inventory).map((row) => [`${row.name}@${row.version}`, row]));
 
-  for (const spec of lockPackageSpecs(lock)) {
+  const specs = lockPackageSpecs(lock);
+  // goals-6hj7: fail loudly if extraction returns no specs from a non-empty lockfile, rather than
+  // letting the loop below pass vacuously and mask a real coverage gap.
+  assert.ok(specs.length > 0, "bun.lock package extraction must be non-empty for a non-empty lockfile");
+  for (const spec of specs) {
     const { name, version } = nameVersionFromSpec(spec);
     assert.ok(rows.has(`${name}@${version}`), `inventory missing pinned lock package ${name}@${version}`);
   }
@@ -148,4 +184,58 @@ test("CI workflow does not use a frozen Bun install without a committed lockfile
   if (!hasBunLock) {
     assert.doesNotMatch(workflow, /bun install[^\n]*--frozen-lockfile/, "no-lockfile packages must not use frozen Bun installs in CI");
   }
+});
+
+test("goals-a6c1: installedPackageJsonFiles audits nested package-local node_modules and skips .bin", async () => {
+  const tmp = await mkdtemp(path.join(tmpdir(), "license-nested-"));
+  try {
+    const nm = (rel) => path.join(tmp, "node_modules", rel);
+    const manifest = (name, license) => JSON.stringify({ name, version: "1.0.0", license });
+
+    // direct dependency
+    await mkdir(nm("direct-pkg"), { recursive: true });
+    await writeFile(nm("direct-pkg/package.json"), manifest("direct-pkg", "MIT"));
+
+    // nested transitive dependency: direct-pkg/node_modules/transitive-pkg
+    await mkdir(nm("direct-pkg/node_modules/transitive-pkg"), { recursive: true });
+    await writeFile(nm("direct-pkg/node_modules/transitive-pkg/package.json"), manifest("transitive-pkg", "MIT"));
+
+    // nested scoped transitive dependency: direct-pkg/node_modules/@scope/scoped-transitive
+    await mkdir(nm("direct-pkg/node_modules/@scope/scoped-transitive"), { recursive: true });
+    await writeFile(nm("direct-pkg/node_modules/@scope/scoped-transitive/package.json"), manifest("@scope/scoped-transitive", "MIT"));
+
+    // deeply nested: transitive-pkg has its own transitive
+    await mkdir(nm("direct-pkg/node_modules/transitive-pkg/node_modules/deep-pkg"), { recursive: true });
+    await writeFile(nm("direct-pkg/node_modules/transitive-pkg/node_modules/deep-pkg/package.json"), manifest("deep-pkg", "MIT"));
+
+    // .bin administrative directory MUST be skipped even though it has a package.json
+    await mkdir(nm(".bin"), { recursive: true });
+    await writeFile(nm(".bin/package.json"), manifest("should-be-skipped", "GPL-3.0"));
+
+    const files = await installedPackageJsonFiles(tmp);
+
+    assert.ok(files.some((f) => f.includes("direct-pkg")), "direct manifests are still included");
+    assert.ok(files.some((f) => f.includes("transitive-pkg")), "nested transitive manifests under package-local node_modules are included");
+    assert.ok(files.some((f) => f.includes("@scope/scoped-transitive")), "nested scoped transitive manifests are included");
+    assert.ok(files.some((f) => f.includes("deep-pkg")), "deeply nested transitive manifests are included");
+    assert.ok(!files.some((f) => f.includes(".bin")), ".bin administrative directory is skipped");
+    assert.ok(!files.some((f) => f.includes("should-be-skipped")), ".bin contents never reach the license audit");
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("goals-6hj7: lockPackageSpecs tolerates whitespace differences and returns [] for empty input", () => {
+  // The prior exact-4-space regex silently returned [] for otherwise-valid formatting; the flexible
+  // matcher must recover specs across indentation widths. Real bun.lock entries are shaped
+  // `<indent>"<bare-name>": ["<name>@<version>", "", ...]`; lockPackageSpecs returns the array's first
+  // element (the name@version spec), so fixtures mirror that shape.
+  const spec = (indent) =>
+    `\n${indent}"left-pad": ["left-pad@1.0.0", "", {}, "sha512-integrityhash"]\n`;
+
+  assert.deepStrictEqual(lockPackageSpecs(spec("    ")), ["left-pad@1.0.0"], "4-space indentation parses");
+  assert.deepStrictEqual(lockPackageSpecs(spec("  ")), ["left-pad@1.0.0"], "2-space indentation parses");
+  assert.deepStrictEqual(lockPackageSpecs(spec("\t")), ["left-pad@1.0.0"], "tab indentation parses");
+  assert.deepStrictEqual(lockPackageSpecs(spec("    ")), lockPackageSpecs(spec("  ")), "indentation does not change extracted specs");
+  assert.deepStrictEqual(lockPackageSpecs("no package specs here\n"), [], "a lockfile with no specs yields [] not an error");
 });
