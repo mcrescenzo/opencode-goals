@@ -950,7 +950,8 @@ test("goal toast formatter summarizes active goal state with redaction and evalu
   const message = goalToastMessage(state);
 
   assert.match(message, /^Goal: ship the toast heartbeat/m);
-  assert.match(message, /Status: active · 2\/5 turns/);
+  assert.match(message, /Status: active · 2\/5 continues/);
+  assert.match(message, /\d+(h|m|s).*left/, "status line includes remaining lifetime budget");
   assert.match(message, /Evaluator: not met \(medium\): tests have not been run yet/);
   assert.match(message, /Verify: failed exit 1/);
   assert.doesNotMatch(message, /super-secret-value|another-secret-value/);
@@ -1079,6 +1080,62 @@ test("remainingLifetimeMs returns positive duration when deadline is in the futu
   const remaining = remainingLifetimeMs(state);
   assert.ok(remaining > 0, "remaining lifetime is positive");
   assert.ok(remaining <= 3 * 60 * 60 * 1000, "remaining lifetime does not exceed the budget");
+});
+
+test("toast-3: goalToastStatusLine includes remaining lifetime when deadlineAt is finite", () => {
+  clearRuntimeState();
+  const state = buildGoalState("s", parseGoalArguments("ship the feature"));
+  state.startedAt = Date.now() - 5 * 60 * 1000; // 5m of active work
+  state.turns = 2;
+  state.maxTurns = 10;
+  state.deadlineAt = Date.now() + 2 * 60 * 60 * 1000; // 2h remaining
+
+  const message = goalToastMessage(state);
+  const statusLine = message.split("\n").find((l) => l.startsWith("Status:"));
+  assert.match(statusLine, /2h 0m left/, `status line shows remaining lifetime, got: ${statusLine}`);
+  assert.match(statusLine, /2\/10 continues/, `status line uses 'continues' label, got: ${statusLine}`);
+});
+
+test("toast-3: goalToastStatusLine omits remaining lifetime when deadlineAt is not finite", () => {
+  clearRuntimeState();
+  const state = buildGoalState("s", parseGoalArguments("ship the feature"));
+  state.startedAt = Date.now() - 5 * 60 * 1000;
+  state.turns = 2;
+  state.maxTurns = 10;
+  state.deadlineAt = NaN; // no lifetime budget
+
+  const message = goalToastMessage(state);
+  const statusLine = message.split("\n").find((l) => l.startsWith("Status:"));
+  assert.doesNotMatch(statusLine, /left/, `status line omits remaining lifetime when deadlineAt is NaN, got: ${statusLine}`);
+});
+
+test("toast-3: goalToastStatusLine omits remaining lifetime when deadline has passed", () => {
+  clearRuntimeState();
+  const state = buildGoalState("s", parseGoalArguments("ship the feature"));
+  state.startedAt = Date.now() - 4 * 60 * 60 * 1000; // 4h ago (past the 3h budget)
+  state.turns = 2;
+  state.maxTurns = 10;
+  state.deadlineAt = Date.now() - 60 * 1000; // deadline already passed
+
+  const message = goalToastMessage(state);
+  const statusLine = message.split("\n").find((l) => l.startsWith("Status:"));
+  assert.doesNotMatch(statusLine, /left/, `status line omits remaining lifetime when deadline passed, got: ${statusLine}`);
+});
+
+test("toast-3: safeToastDuration rejects 0 and returns the fallback", async () => {
+  // safeToastDuration is not exported; test indirectly through the toast heartbeat snapshot defaults
+  // and through the toast() path. A duration of 0 must not survive — it would produce an
+  // instantly-dismissed toast. The fallback is GOAL_TOAST_DURATION_MS (10_000).
+  clearRuntimeState();
+  const toasts = [];
+  const client = fakeClient({
+    client: { tui: { showToast: async (req) => { toasts.push(req?.body ?? req); } } },
+  });
+  // toast() with durationMs: 0 must fall back to the default, not pass 0 through.
+  await toast(client, "test message", "info", { durationMs: 0 });
+  assert.equal(toasts.length, 1);
+  assert.equal(toasts[0].duration, GOAL_TOAST_DURATION_MS, "durationMs:0 falls back to GOAL_TOAST_DURATION_MS");
+  assert.notEqual(toasts[0].duration, 0, "duration must never be 0");
 });
 
 test("goal toast heartbeat is focused on one touched session and never summarizes other active goals", async () => {

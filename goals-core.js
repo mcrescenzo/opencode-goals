@@ -2202,7 +2202,8 @@ export function safeToastText(text, maxChars = GOAL_TOAST_DETAIL_MAX_CHARS) {
 }
 
 function safeToastDuration(value, fallback = GOAL_TOAST_DURATION_MS) {
-  return Number.isFinite(value) && value >= 0 ? value : fallback;
+  // toast-3: reject 0 (would produce an instantly-dismissed toast); only positive durations are valid.
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 function isGoalToastOperationalReason(reason) {
@@ -2216,9 +2217,11 @@ function isGoalToastErrorReason(reason) {
 function goalToastStatusLine(state) {
   const bits = [safeToastText(state?.status || "unknown", 30) || "unknown"];
   if (Number.isFinite(state?.turns) && Number.isFinite(state?.maxTurns)) {
-    bits.push(`${state.turns}/${state.maxTurns} turns`);
+    bits.push(`${state.turns}/${state.maxTurns} continues`);
   }
   if (Number.isFinite(state?.startedAt)) bits.push(activeElapsed(state));
+  const remaining = remainingLifetimeMs(state);
+  if (remaining !== null && remaining > 0) bits.push(`${formatDuration(remaining)} left`);
   if (state?.observe) bits.push("observe");
   return bits.join(" · ");
 }
