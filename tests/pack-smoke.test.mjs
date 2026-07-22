@@ -128,7 +128,7 @@ test("npm pack --dry-run advertises exactly the package runtime files (no tests,
   const forbidden = paths.filter((p) => isForbiddenPackPath(p));
   assert.deepEqual(forbidden, [], `packed tarball leaks non-runtime files: ${forbidden.join(", ")}`);
   // Sanity: the essential runtime files are advertised.
-  for (const required of ["goals.js", "goals-core.js", "goal-state.js", "diagnostics.js", "secret-redaction.js", "unicode-text.js", "commands/goal.md", "package.json", "README.md"]) {
+  for (const required of ["goals.js", "goals-core.js", "opencode-session-adapter.js", "goal-state.js", "diagnostics.js", "secret-redaction.js", "unicode-text.js", "commands/goal.md", "package.json", "README.md"]) {
     assert.ok(paths.includes(required), `packed tarball is missing advertised runtime file: ${required}`);
   }
 });
@@ -159,6 +159,7 @@ test("goals-nf7v: pack forbidden-path matcher rejects nested children of forbidd
   const allowed = [
     "goals.js",
     "goals-core.js",
+    "opencode-session-adapter.js",
     "goal-state.js",
     "diagnostics.js",
     "secret-redaction.js",

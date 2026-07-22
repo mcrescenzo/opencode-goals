@@ -3,6 +3,12 @@ import test from "node:test";
 
 import {
   hiddenSessionPrompt,
+  responseText,
+} from "../goals-core.js";
+import * as goalsCore from "../goals-core.js";
+import {
+  callOpenCodeSessionMethod,
+  callOpenCodeSessionPathMethod,
   isSessionPathShapeIncompatibility,
   openCodeSessionAbort,
   openCodeSessionCreate,
@@ -11,9 +17,30 @@ import {
   openCodeSessionMessages,
   openCodeSessionPrompt,
   openCodeSessionPromptAsync,
-  responseText,
-} from "../goals-core.js";
+  sessionResponseData,
+  sessionResponseError,
+} from "../opencode-session-adapter.js";
 import { fakeClient, pathShapeError, tempRoot } from "./helpers.mjs";
+
+test("goals-7cee: goals-core preserves the extracted session adapter exports", () => {
+  assert.equal(typeof hiddenSessionPrompt, "function", "core-only hidden session behavior remains exported from goals-core");
+  for (const [name, helper] of Object.entries({
+    callOpenCodeSessionMethod,
+    callOpenCodeSessionPathMethod,
+    isSessionPathShapeIncompatibility,
+    openCodeSessionAbort,
+    openCodeSessionCreate,
+    openCodeSessionDelete,
+    openCodeSessionDiff,
+    openCodeSessionMessages,
+    openCodeSessionPrompt,
+    openCodeSessionPromptAsync,
+    sessionResponseData,
+    sessionResponseError,
+  })) {
+    assert.equal(goalsCore[name], helper, `goals-core re-exports the adapter's ${name} binding`);
+  }
+});
 
 test("goals-gzm.73: responseText reads raw top-level message parts without a data wrapper", () => {
   assert.equal(

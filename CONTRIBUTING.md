@@ -113,7 +113,7 @@ cd - && rm -rf /tmp/goals-rel
 Before opening a pull request, also run the syntax and package checks used for release validation:
 
 ```bash
-node --check goals.js && node --check goals-core.js && node --check goal-state.js && node --check diagnostics.js && node --check secret-redaction.js && node --check unicode-text.js
+node --check goals.js && node --check goals-core.js && node --check opencode-session-adapter.js && node --check goal-state.js && node --check diagnostics.js && node --check secret-redaction.js && node --check unicode-text.js
 npm pack --dry-run --json
 ```
 

@@ -10,10 +10,35 @@ import { setTimeout as setTimeoutPromise } from "node:timers/promises";
 import path from "node:path";
 import { summarizeError } from "./diagnostics.js";
 import { baseGoalState } from "./goal-state.js";
+import {
+  openCodeSessionAbort,
+  openCodeSessionCreate,
+  openCodeSessionDelete,
+  openCodeSessionDiff,
+  openCodeSessionMessages,
+  openCodeSessionPrompt,
+  openCodeSessionPromptAsync,
+  sessionResponseData,
+  sessionResponseError,
+} from "./opencode-session-adapter.js";
 import { redactInlineSecretText } from "./secret-redaction.js";
 import { codePoints, sliceCodePoints } from "./unicode-text.js";
 
 export { baseGoalState } from "./goal-state.js";
+export {
+  callOpenCodeSessionMethod,
+  callOpenCodeSessionPathMethod,
+  isSessionPathShapeIncompatibility,
+  openCodeSessionAbort,
+  openCodeSessionCreate,
+  openCodeSessionDelete,
+  openCodeSessionDiff,
+  openCodeSessionMessages,
+  openCodeSessionPrompt,
+  openCodeSessionPromptAsync,
+  sessionResponseData,
+  sessionResponseError,
+} from "./opencode-session-adapter.js";
 
 const NOFOLLOW_FLAG = fsConstants.O_NOFOLLOW ?? 0;
 const WRITE_NOFOLLOW_FLAGS = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | NOFOLLOW_FLAG;
@@ -830,6 +855,9 @@ export function buildContinueMessage(state, decision = {}, options = {}) {
         .filter((step) => typeof step === "string" && step.trim())
         .slice(0, 3)
     : [];
+  const firstEvidenceGap = Array.isArray(decision.evidenceGaps)
+    ? decision.evidenceGaps.find((gap) => typeof gap === "string" && gap.trim())?.trim()
+    : "";
   const lines = [
     "<goal_continuation>",
     buildGoalBlock(state),
@@ -846,6 +874,7 @@ export function buildContinueMessage(state, decision = {}, options = {}) {
     // goals-pf3: scrub inline secrets first (compose redact + escape) before relaying into the
     // hidden continuation prompt.
     decision.reason ? `Evaluator reason: ${redactAndEscapeGoalText(decision.reason)}` : "Evaluator reason: no evaluator reason yet.",
+    firstEvidenceGap ? `Open evidence gap: ${redactAndEscapeGoalText(firstEvidenceGap)}` : null,
     nextSteps.length ? "Evaluator next steps:" : null,
     ...nextSteps.map((step, index) => `${index + 1}. ${redactAndEscapeGoalText(step)}`),
     !nextSteps.length && decision.next ? `Next useful step: ${redactAndEscapeGoalText(decision.next)}` : null,
@@ -1560,138 +1589,12 @@ export function goalEvidenceTranscript(messages) {
   );
 }
 
-export function sessionResponseData(result) {
-  if (result && typeof result === "object" && Object.hasOwn(result, "data")) {
-    return result.data;
-  }
-  return result;
-}
-
-export function sessionResponseError(result) {
-  return result && typeof result === "object" && Object.hasOwn(result, "error")
-    ? result.error
-    : null;
-}
-
 export function responseText(result) {
   return messageParts(sessionResponseData(result))
     .filter((part) => part?.type === "text" && typeof part.text === "string")
     .map((part) => part.text)
     .join("\n")
     .trim();
-}
-
-function errorField(error, field) {
-  if (!error || typeof error !== "object") return undefined;
-  return error[field] ?? error.cause?.[field] ?? error.error?.[field] ?? error.response?.[field];
-}
-
-function errorText(error) {
-  if (!error) return "";
-  if (typeof error === "string") return error;
-  const fields = [
-    error.name,
-    error.code,
-    error.status,
-    error.statusCode,
-    error.message,
-    errorField(error, "name"),
-    errorField(error, "code"),
-    errorField(error, "status"),
-    errorField(error, "statusCode"),
-    errorField(error, "message"),
-  ];
-  try {
-    fields.push(JSON.stringify(error.body ?? error.data ?? error.response?.data ?? error.response?.body));
-  } catch {}
-  return fields.filter((value) => value != null).map(String).join(" ");
-}
-
-export function isSessionPathShapeIncompatibility(error) {
-  const text = errorText(error).toLowerCase();
-  if (!text) return false;
-  if (/\b(abort|aborted|timeout|timed out|provider|model|auth|permission|rate|quota|token|tool|schema|format|json|parts|body|agent)\b/.test(text)) {
-    return false;
-  }
-
-  const status = Number(errorField(error, "status") ?? errorField(error, "statusCode") ?? error?.status ?? error?.statusCode);
-  const transportShapeStatus = status === 400 || status === 404 || /\b(bad\s*request|invalid\s*request|not\s*found|badrequest|invalidrequest|notfound|badrequesterror|invalidrequesterror|notfounderror|400|404)\b/.test(text);
-  if (!transportShapeStatus) return false;
-
-  // v1 option-object clients leave `/session/{id}` unresolved when called with v2 `{sessionID}`.
-  // Some generated clients surface that as a terse BadRequest/NotFound without a field-level detail.
-  if (/\b(path|route|url|param|parameter|sessionid|session id|\bid\b|required|missing|undefined|\{id\}|\{sessionid\})\b/.test(text)) {
-    return true;
-  }
-  return /\b(badrequesterror|invalidrequesterror|notfounderror)\b/.test(text);
-}
-
-function hasUnresolvedSessionIDPath(result) {
-  const url = String(result?.request?.url ?? result?.response?.url ?? "");
-  if (!url) return false;
-  return /\{(?:sessionid|id)\}/i.test(url) || /%7b(?:sessionid|id)%7d/i.test(url);
-}
-
-function sessionRequestOptions(ctx, options = {}) {
-  const query = { directory: ctx.directory, ...(options.query ?? {}) };
-  return { ...options, query };
-}
-
-export async function callOpenCodeSessionMethod(ctx, method, options = {}) {
-  const session = ctx.client?.session;
-  const fn = session?.[method];
-  if (typeof fn !== "function") throw new TypeError(`OpenCode session.${method} is not available`);
-  return fn.call(session, sessionRequestOptions(ctx, options));
-}
-
-export async function callOpenCodeSessionPathMethod(ctx, method, sessionID, options = {}) {
-  const session = ctx.client?.session;
-  const fn = session?.[method];
-  if (typeof fn !== "function") throw new TypeError(`OpenCode session.${method} is not available`);
-
-  const baseOptions = sessionRequestOptions(ctx, options);
-  const primary = { ...baseOptions, path: { sessionID } };
-  let result;
-  try {
-    result = await fn.call(session, primary);
-  } catch (error) {
-    if (!isSessionPathShapeIncompatibility(error)) throw error;
-    return fn.call(session, { ...baseOptions, path: { id: sessionID } });
-  }
-
-  const error = sessionResponseError(result);
-  if (hasUnresolvedSessionIDPath(result) || isSessionPathShapeIncompatibility(error)) {
-    return fn.call(session, { ...baseOptions, path: { id: sessionID } });
-  }
-  return result;
-}
-
-export function openCodeSessionCreate(ctx, body, options = {}) {
-  return callOpenCodeSessionMethod(ctx, "create", { ...options, body });
-}
-
-export function openCodeSessionPrompt(ctx, sessionID, body, options = {}) {
-  return callOpenCodeSessionPathMethod(ctx, "prompt", sessionID, { ...options, body });
-}
-
-export function openCodeSessionPromptAsync(ctx, sessionID, body, options = {}) {
-  return callOpenCodeSessionPathMethod(ctx, "promptAsync", sessionID, { ...options, body });
-}
-
-export function openCodeSessionMessages(ctx, sessionID, query = {}) {
-  return callOpenCodeSessionPathMethod(ctx, "messages", sessionID, { query });
-}
-
-export function openCodeSessionDiff(ctx, sessionID, query = {}) {
-  return callOpenCodeSessionPathMethod(ctx, "diff", sessionID, { query });
-}
-
-export function openCodeSessionAbort(ctx, sessionID, query = {}, options = {}) {
-  return callOpenCodeSessionPathMethod(ctx, "abort", sessionID, { ...options, query });
-}
-
-export function openCodeSessionDelete(ctx, sessionID, query = {}, options = {}) {
-  return callOpenCodeSessionPathMethod(ctx, "delete", sessionID, { ...options, query });
 }
 
 export function extractJsonObjectText(text) {
@@ -2120,12 +2023,14 @@ Session diff summary:
 ${diff || "(No session diff summary was available.)"}`;
 }
 
-export function evaluatorPrompt(state, transcript, diff, researchReport = "", retryReason = "", recentCycles = []) {
+export function evaluatorPrompt(state, transcript, diff, researchReport = "", retryReason = "", recentCycles = [], retryType = "protocol-confusion") {
   // goals-2n6: retryReason is the prior (invalid) evaluator reason relayed back in — model-controlled
   // untrusted text — so neutralize structural tags before embedding it in the evaluator prompt.
   // goals-pf3: scrub inline secrets first (compose redact + escape).
   const retryText = retryReason
-    ? `\nYour previous response evaluated evaluator protocol/output formatting instead of the user's goal. Ignore JSON/output-format/max-step/protocol issues unless the user's goal explicitly asks about them. Decide only whether transcript evidence satisfies the goal.\n\nPrevious invalid reason:\n${redactAndEscapeGoalText(retryReason)}\n`
+    ? retryType === "parse-error"
+      ? `\nYour previous response was not valid JSON. Return only the requested JSON object.\n\nPrevious invalid reason:\n${redactAndEscapeGoalText(retryReason)}\n`
+      : `\nYour previous response evaluated evaluator protocol/output formatting instead of the user's goal. Ignore JSON/output-format/max-step/protocol issues unless the user's goal explicitly asks about them. Decide only whether transcript evidence satisfies the goal.\n\nPrevious invalid reason:\n${redactAndEscapeGoalText(retryReason)}\n`
     : "";
 
   // goals-2n6: lastEvidence is the assistant-authored [goal:evidence] line (untrusted; derived from
@@ -2807,6 +2712,7 @@ export async function askGoalEvaluator(ctx, sessionID, state, transcript, diff, 
         researchReport,
         attempt ? decision?.reason : "",
         recentCycles,
+        attempt && decision?.parseError ? "parse-error" : "protocol-confusion",
       ),
       metadataKind: "evaluation",
       system:
@@ -2821,6 +2727,8 @@ export async function askGoalEvaluator(ctx, sessionID, state, transcript, diff, 
     if (result.type === "error") return result;
 
     decision = result.decision;
+
+    if (decision.parseError && attempt === 0) continue;
 
     if (!decision.parseError && !decision.met && evaluatorProtocolConfusion(decision, state)) {
       if (attempt === 0) continue;

@@ -227,8 +227,33 @@ user-configurable):
 - Hidden-call budget scaled to the turn budget, plus stall heuristics that pause
   after repeated low-progress or no-tool-call continuation turns.
 
-The hidden `goal-evaluator` and `goal-researcher` agents take their model from
-the session's configured model (`cfg.model`) — no model ID is hard-coded.
+The hidden `goal-evaluator` and `goal-researcher` agents default to the session's
+configured model (`cfg.model`) — no model ID is hard-coded. At runtime, evaluator,
+researcher, and audit prompts follow the model captured from the latest genuine
+build turn (falling back to the initial build model), so their quality and cost
+track that session-model choice.
+
+The skeptical audit is a separate judgment pass, but it uses the same selected
+model and reviews the same evidence plus the primary verdict. It therefore adds
+skeptical prompting, not cross-model or evidence independence. No comparative
+benchmark currently supports claiming that a stronger model materially reduces
+false positives, so the plugin does not impose a separate evaluator-model
+override.
+
+### Hidden model calls and cost
+
+An ordinary not-met cycle uses **1** hidden call (evaluator); a met cycle uses
+**2** (evaluator + skeptical audit); and an evidence-seeking cycle that runs the
+researcher and then reaches met uses **4** (evaluator + researcher + evaluator +
+audit). The audit is the extra call used by the plugin's fail-closed completion
+check, not optional overhead in a met cycle. Each `askGoalEvaluator` pass can
+retry once for malformed JSON or protocol confusion; the audit does not retry.
+The respective retry-inclusive maxima are **2 / 3 / 6** calls.
+
+The user-facing controls are `--max-turns` (default **100**), the ~3-hour active
+lifetime cap, and a hidden-call cap of `4 × maxTurns + 20`. These bound calls and
+lifetime, not provider dollars or tokens: actual cost varies with the model,
+context, output, and researcher tool steps.
 
 ## Persistence
 
@@ -239,6 +264,13 @@ Goal state is written per workspace:
 .opencode/goals/state.json.ledger.jsonl
 .opencode/goals/cycles.jsonl
 ```
+
+Records are keyed per session, while these three files are shared by every
+session in the workspace. Serialized read-merge-write persistence preserves
+concurrent sessions. The in-memory map tracks at most 256 sessions, evicting the
+oldest non-active entry first; if all 256 are active, adding another pauses and
+evicts the oldest active goal while leaving its persisted state recoverable.
+Cleared session IDs are tombstoned for seven days to prevent stale resurrection.
 
 Active goals recover as **paused** after an opencode restart; run `/goal resume`
 to continue with fresh turn and stall counters. State writes are refused when the

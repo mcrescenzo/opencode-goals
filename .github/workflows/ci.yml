@@ -32,6 +32,7 @@ jobs:
         run: |
           node --check goals.js
           node --check goals-core.js
+          node --check opencode-session-adapter.js
           node --check goal-state.js
           node --check diagnostics.js
           node --check secret-redaction.js

@@ -13,6 +13,7 @@
   "files": [
     "goals.js",
     "goals-core.js",
+    "opencode-session-adapter.js",
     "goal-state.js",
     "diagnostics.js",
     "secret-redaction.js",
